@@ -29,7 +29,7 @@ while (&getline) {				# calculate all label addresses
 		$code = $inst{$_[0]};
 		if($code==15) {
 			$pc += 4;
-		} elsif ($code == 0 || $code == 1 || $code >= 8 && $code < 12 || 
+		} elsif ($code == 1 || $code >= 8 && $code < 12 || 
 		         $code == 3 || $code == 6 || $code == 12 || $code == 16) {
 			$pc += 3;
 		} else {
@@ -141,7 +141,7 @@ sub getline {
 
 sub putline {
 	if ($BRAM) {
-		printf "%01x\n", shift(@_);
+		printf "%02x\n", shift(@_);
 		$pc++;
 	} else {
 		printf "\t\t\t10'h%03x: data = 4'h%x;%s\n", $pc++, shift(@_), $scd;
