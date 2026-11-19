@@ -1,5 +1,9 @@
 # Compact USB HID host FPGA core
 
+Espilon, 11/2026
+
+Added CRC16 validation of incoming reports.
+
 Epsilon, 2/2024
 
 Added keyboard LED control.
