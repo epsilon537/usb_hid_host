@@ -21,8 +21,9 @@ module usb_hid_host (
     output wire ack_update_leds_stb,    // Acknowledgement strobe that the USB HID keyboard command has been sent.
     input  wire [3:0] leds,             // The Keyboard LED bitmap: bit0=Num Loc, bit1=CAPS lock, bit2=scroll lock, bit3=compose.
     output reg [1:0] typ,  // device type. 0: no device, 1: keyboard, 2: mouse, 3: gamepad
-    output reg report,  // pulse after report received from device.
+    output reg report,  // pulse after valid report received from device.
                         // key_*, mouse_*, game_* valid depending on typ
+    output wire report_err,  // pulse after receiving a damaged report (CRC16 error) from device.
     output wire conerr,  // connection or protocol error
 
     // keyboard
@@ -61,6 +62,7 @@ module usb_hid_host (
   wire [2:0] save_r;  // which register to save to
   wire [2:0] save_b;  // dat[b]
   wire connected;
+  wire packet_valid;
 
   reg [15:0] crc16;
 
@@ -107,7 +109,9 @@ module usb_hid_host (
       .save_r(save_r),
       .save_b(save_b),
       .connected(connected),
-      .conerr(conerr)
+      .conerr(conerr),
+      .packet_valid(packet_valid),
+      .packet_err(report_err)
   );
 
   reg [2:0] rcvct;  // counter for recv data. Low Speed USB HID reports are 8 bytes long.
@@ -129,88 +133,63 @@ module usb_hid_host (
     data_rdy_r    <= data_rdy;
     data_strobe_r <= data_strobe;
     report        <= 0;  // ensure pulse
-    if (report == 1) begin
+
+    if (report) begin
       // clear mouse movement for later
       mouse_dx <= 0;
       mouse_dy <= 0;
     end
-    if (~data_rdy) begin
-      rcvct <= 0;
-    end else begin
-      if (data_strobe && ~data_strobe_r) begin  // rising edge of ukp data strobe
-        dat[rcvct] <= ukpdat;
 
-        if (typ == 1) begin  // keyboard
-          case (rcvct)
-            0: key_modifiers <= ukpdat;
-            2: key1 <= ukpdat;
-            3: key2 <= ukpdat;
-            4: key3 <= ukpdat;
-            5: key4 <= ukpdat;
-          endcase
-        end else if (typ == 2) begin  // mouse
-          case (rcvct)
-            0: mouse_btn <= ukpdat;
-            1: mouse_dx <= ukpdat;
-            2: mouse_dy <= ukpdat;
-          endcase
-        end else if (typ == 3) begin  // gamepad
-          // A typical report layout:
-          // - d[3] is X axis (0: left, 255: right)
-          // - d[4] is Y axis
-          // - d[5][7:4] is buttons YBAX
-          // - d[6][5:4] is buttons START,SELECT
-          // Variations:
-          // - Some gamepads uses d[0] and d[1] for X and Y axis.
-          // - Some transmits a different set when d[0][1:0] is 2 (a dualshock adapter)
-          case (rcvct)
-            0: begin
-              if (ukpdat[1:0] != 2'b10) begin
-                // for DualShock2 adapter, 2'b10 marks an irrelevant record
-                valid  <= 1;
-                game_l <= 0;
-                game_r <= 0;
-                game_u <= 0;
-                game_d <= 0;
-              end else valid <= 0;
-              if (ukpdat == 8'h00) {game_l, game_r} <= 2'b10;
-              if (ukpdat == 8'hff) {game_l, game_r} <= 2'b01;
-            end
-            1: begin
-              if (ukpdat == 8'h00) {game_u, game_d} <= 2'b10;
-              if (ukpdat == 8'hff) {game_u, game_d} <= 2'b01;
-            end
-            3:
-            if (valid) begin
-              if (ukpdat[7:6] == 2'b00) {game_l, game_r} <= 2'b10;
-              if (ukpdat[7:6] == 2'b11) {game_l, game_r} <= 2'b01;
-            end
-            4:
-            if (valid) begin
-              if (ukpdat[7:6] == 2'b00) {game_u, game_d} <= 2'b10;
-              if (ukpdat[7:6] == 2'b11) {game_u, game_d} <= 2'b01;
-            end
-            5:
-            if (valid) begin
-              game_x <= ukpdat[4];
-              game_a <= ukpdat[5];
-              game_b <= ukpdat[6];
-              game_y <= ukpdat[7];
-            end
-            6:
-            if (valid) begin
-              game_sel <= ukpdat[4];
-              game_sta <= ukpdat[5];
-            end
-          endcase
-          // TODO: add any special handling if needed
-          // (using the detected controller type in 'dev')
-        end
-        rcvct <= rcvct + 1;
-      end
+    if (!data_rdy) begin
+      rcvct <= 0;
+    end else if (data_strobe && !data_strobe_r) begin  // rising edge of ukp data strobe
+      dat[rcvct] <= ukpdat;
+      rcvct <= rcvct + 1;
     end
-    if (~data_rdy && data_rdy_r && typ != 0)  // falling edge of ukp data ready
-      report <= 1;
+
+    if (packet_valid) begin
+      case (typ)
+        1: begin  // boot keyboard: modifier, reserved, up to six keycodes
+          key_modifiers <= dat[0];
+          key1 <= dat[2];
+          key2 <= dat[3];
+          key3 <= dat[4];
+          key4 <= dat[5];
+        end
+        2: begin  // boot mouse
+          mouse_btn <= dat[0];
+          mouse_dx  <= dat[1];
+          mouse_dy  <= dat[2];
+        end
+        3: begin  // existing generic gamepad interpretation
+          if (dat[0][1:0] != 2'b10) begin
+            game_l <= 0;
+            game_r <= 0;
+            game_u <= 0;
+            game_d <= 0;
+          end
+          if (dat[0] == 8'h00) {game_l, game_r} <= 2'b10;
+          if (dat[0] == 8'hff) {game_l, game_r} <= 2'b01;
+          if (dat[1] == 8'h00) {game_u, game_d} <= 2'b10;
+          if (dat[1] == 8'hff) {game_u, game_d} <= 2'b01;
+          if (dat[0][1:0] != 2'b10) begin
+            if (dat[3][7:6] == 2'b00) {game_l, game_r} <= 2'b10;
+            if (dat[3][7:6] == 2'b11) {game_l, game_r} <= 2'b01;
+            if (dat[4][7:6] == 2'b00) {game_u, game_d} <= 2'b10;
+            if (dat[4][7:6] == 2'b11) {game_u, game_d} <= 2'b01;
+            game_x   <= dat[5][4];
+            game_a   <= dat[5][5];
+            game_b   <= dat[5][6];
+            game_y   <= dat[5][7];
+            game_sel <= dat[6][4];
+            game_sta <= dat[6][5];
+          end
+        end
+        default: begin
+        end
+      endcase
+      report <= 1'b1;
+    end
   end
 
   reg save_delayed;
@@ -253,7 +232,9 @@ module ukp (
     output reg [2:0] save_r,
     output reg [2:0] save_b,
     output reg connected,
-    output wire conerr
+    output wire conerr,
+    output reg packet_valid,  // one-cycle pulse after a valid DATA packet
+    output reg packet_err  // one-cycle pulse after a invalid DATA packet
 );
 
   parameter S_OPCODE = 0;
@@ -268,7 +249,11 @@ module ukp (
   parameter S_TOGGLE0 = 9;
   parameter S_TOGGLE1 = 10;
 
-  reg dpi, dmi;
+  // Two-stage synchronizer for asynchronous USB D+ and D- inputs
+  (* ASYNC_REG = "TRUE" *)reg [1:0] dp_sync;
+  (* ASYNC_REG = "TRUE" *)reg [1:0] dm_sync;
+
+  wire dpi, dmi;
   reg        ukprdyd;
 
   wire [4:0] inst;
@@ -304,8 +289,22 @@ module ukp (
   reg req_branch_reg;
   reg dmid;
   reg [23:0] conct;
+  reg [15:0] crc16_rx = 16'hffff;
+  wire decoded_bit = dmis ~^ dmi;
+
+  function [15:0] crc16_step;
+    input [15:0] crc;
+    input bit_in;
+    reg feedback;
+    begin
+      feedback   = crc[0] ^ bit_in;
+      crc16_step = {1'b0, crc[15:1]} ^ (feedback ? 16'ha001 : 16'h0000);
+    end
+  endfunction
 
   assign conerr = conct[23] || ~usbrst_n;
+  assign dpi = dp_sync[1];
+  assign dmi = dm_sync[1];
 
   usb_hid_host_rom ukprom (
       .clk (usbclk),
@@ -326,6 +325,9 @@ module ukp (
     ug = 0;
     req_branch_reg = 0;
     ack_req_branch_stb = 0;
+    crc16_rx = 16'hffff;
+    packet_valid = 0;
+    packet_err = 0;
   end
 
   always @(posedge usbclk) begin
@@ -339,17 +341,25 @@ module ukp (
       mbit <= 0;
       bitadr <= 0;
       nak <= 1;
+      packet_valid <= 0;
+      packet_err <= 0;
       ug <= 0;
       req_branch_reg <= 0;
       ack_req_branch_stb <= 0;
+      dp_sync <= 2'b00;
+      dm_sync <= 2'b10;  // Or 2'b00; settles within 2 clock cycles
+      crc16_rx <= 16'hffff;
     end else begin
       ack_req_branch_stb <= 1'b0;
+      packet_valid <= 1'b0;
+      packet_err <= 1'b0;
       if (req_branch_stb) begin
         req_branch_reg <= 1'b1;
       end
 
-      dpi  <= usb_dp_i;
-      dmi  <= usb_dm_i;
+      dp_sync <= {dp_sync[0], usb_dp_i};
+      dm_sync <= {dm_sync[0], usb_dm_i};
+
       save <= 0;  // ensure pulse
       if (inst_ready) begin
         // Instruction decoding
@@ -503,21 +513,40 @@ module ukp (
         bitadr <= 0;
         nak <= 1;
         nrzrxct <= 0;
+        crc16_rx <= 16'hffff;
       end else if (ug == 0 && dmi != dmid) timing <= 1;
       else timing <= timing + 1;
-      // IN instruction
+      // IN receive: decode NRZI, remove stuffed zeros, and validate DATA CRC16.
       if (sample) begin
-        if (bitadr == 8) nak <= dmi;
-        if (nrzrxct != 6) begin
-          data[6:0] <= data[7:1];
-          data[7]   <= dmis ~^ dmi;  // ~^/^~ is XNOR, testing bit equality
-          bitadr    <= bitadr + 1;
-          nrzon     <= 0;
-        end else nrzon <= 1;
-        dmis <= dmi;
-        if (dmis ~^ dmi) nrzrxct <= nrzrxct + 1;
-        else nrzrxct <= 0;
-        if (~dmi && ~dpi) ukprdy <= 0;  // SE0: packet is finished. Mouses send length 4 reports.
+        // SE0 marks the end of the packet. The CRC accumulator includes
+        // payload and the 16 received CRC bits; the USB residue is B001.
+        if (~dmi && ~dpi) begin
+          ukprdy <= 0;  // SE0: packet is finished. Mouses send length 4 reports.
+          if (bitadr >= 32) begin
+            if (crc16_rx == 16'hb001 && !nak) begin
+              packet_valid <= 1'b1;
+            end else begin
+              nak <= 1'b1;  // withhold ACK; firmware's BNAK retries the IN
+              packet_err <= 1'b1;
+            end
+          end
+        end else begin
+          if (bitadr == 8) nak <= dmi;
+          if (nrzrxct == 6) begin
+            nrzon <= 1;
+          end else begin
+            data[6:0] <= data[7:1];
+            data[7]   <= decoded_bit;
+            bitadr    <= bitadr + 1;
+            nrzon     <= 0;
+            // SYNC and PID occupy unstuffed bit positions 0..15.
+            // CRC is accumulated LSB-first over payload plus received CRC.
+            if (bitadr >= 16 && bitadr < 96) crc16_rx <= crc16_step(crc16_rx, decoded_bit);
+          end
+          dmis <= dmi;
+          if (decoded_bit) nrzrxct <= nrzrxct + 1;
+          else nrzrxct <= 0;
+        end
       end
       if (ug == 0) begin
         if (bitadr == 24) ukprdy <= 1;  // ignore first 3 bytes
