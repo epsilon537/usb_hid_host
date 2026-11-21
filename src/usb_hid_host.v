@@ -21,34 +21,34 @@ module usb_hid_host (
     output wire ack_update_leds_stb,    // Acknowledgement strobe that the USB HID keyboard command has been sent.
     input  wire [3:0] leds,             // The Keyboard LED bitmap: bit0=Num Loc, bit1=CAPS lock, bit2=scroll lock, bit3=compose.
     output reg [1:0] typ,  // device type. 0: no device, 1: keyboard, 2: mouse, 3: gamepad
-    output reg report,  // pulse after valid report received from device.
-                        // key_*, mouse_*, game_* valid depending on typ
-    output wire report_err,  // pulse after receiving a damaged report (CRC16 error) from device.
+    output wire report,  // pulse on valid report received from device.
+                         // key_*, mouse_*, game_* valid depending on typ
+    output wire report_err,  // pulse on receiving a damaged report (CRC16 error) from device.
     output wire conerr,  // connection or protocol error
 
     // keyboard
-    output reg [7:0] key_modifiers,
-    output reg [7:0] key1,
-    output reg [7:0] key2,
-    output reg [7:0] key3,
-    output reg [7:0] key4,
+    output wire [7:0] key_modifiers,
+    output wire [7:0] key1,
+    output wire [7:0] key2,
+    output wire [7:0] key3,
+    output wire [7:0] key4,
 
     // mouse
-    output reg        [7:0] mouse_btn,  // {5'bx, middle, right, left}
-    output reg signed [7:0] mouse_dx,   // signed 8-bit, cleared after `report` pulse
-    output reg signed [7:0] mouse_dy,   // signed 8-bit, cleared after `report` pulse
+    output wire        [7:0] mouse_btn,  // {5'bx, middle, right, left}
+    output wire signed [7:0] mouse_dx,   // signed 8-bit
+    output wire signed [7:0] mouse_dy,   // signed 8-bit
 
     // gamepad
-    output reg game_l,
-    output reg game_r,
-    output reg game_u,
-    output reg game_d,    // left right up down
-    output reg game_a,
-    output reg game_b,
-    output reg game_x,
-    output reg game_y,
-    output reg game_sel,
-    output reg game_sta,  // buttons
+    output wire game_l,
+    output wire game_r,
+    output wire game_u,
+    output wire game_d,    // left right up down
+    output wire game_a,
+    output wire game_b,
+    output wire game_x,
+    output wire game_y,
+    output wire game_sel,
+    output wire game_sta,  // buttons
 
     // debug
     output wire [63:0] dbg_hid_report  // last HID report
@@ -63,6 +63,17 @@ module usb_hid_host (
   wire [2:0] save_b;  // dat[b]
   wire connected;
   wire packet_valid;
+
+  reg game_l_r;
+  reg game_r_r;
+  reg game_u_r;
+  reg game_d_r;  // left right up down
+  reg game_a_r;
+  reg game_b_r;
+  reg game_x_r;
+  reg game_y_r;
+  reg game_sel_r;
+  reg game_sta_r;  // buttons
 
   reg [15:0] crc16;
 
@@ -115,80 +126,77 @@ module usb_hid_host (
   );
 
   reg [2:0] rcvct;  // counter for recv data. Low Speed USB HID reports are 8 bytes long.
-  reg data_strobe_r, data_rdy_r;  // delayed data_strobe and data_rdy
+  reg data_strobe_r;  // delayed data_strobe
   reg [7:0] dat[0:7];  // data in last response
+
   assign dbg_hid_report = {dat[7], dat[6], dat[5], dat[4], dat[3], dat[2], dat[1], dat[0]};
-  // assign dbg_regs = regs;
+  assign report = packet_valid && (typ != 2'b00);
 
-  // Gamepad types, see response_recognition below
-  // localparam D_GENERIC = 0;
-  // localparam D_GAMEPAD = 1;
-  // localparam D_DS2_ADAPTER = 2;
-  // reg [3:0] dev = D_GENERIC;                   // device type recognized through VID/PID
-  // assign dbg_dev = dev;
+  assign key_modifiers = dat[0];
+  assign key1 = dat[2];
+  assign key2 = dat[3];
+  assign key3 = dat[4];
+  assign key4 = dat[5];
 
-  reg valid = 0;  // whether current gamepad report is valid
+  assign mouse_btn = dat[0];
+  assign mouse_dx = dat[1];
+  assign mouse_dy = dat[2];
+
+  always @* begin
+    game_l_r   = 0;
+    game_r_r   = 0;
+    game_u_r   = 0;
+    game_d_r   = 0;
+    game_a_r   = 0;
+    game_b_r   = 0;
+    game_x_r   = 0;
+    game_y_r   = 0;
+    game_sel_r = 0;
+    game_sta_r = 0;
+
+    if (dat[0] == 8'h00) {game_l_r, game_r_r} = 2'b10;
+    if (dat[0] == 8'hff) {game_l_r, game_r_r} = 2'b01;
+    if (dat[1] == 8'h00) {game_u_r, game_d_r} = 2'b10;
+    if (dat[1] == 8'hff) {game_u_r, game_d_r} = 2'b01;
+    if (dat[0][1:0] != 2'b10) begin
+      if (dat[3][7:6] == 2'b00) {game_l_r, game_r_r} = 2'b10;
+      if (dat[3][7:6] == 2'b11) {game_l_r, game_r_r} = 2'b01;
+      if (dat[4][7:6] == 2'b00) {game_u_r, game_d_r} = 2'b10;
+      if (dat[4][7:6] == 2'b11) {game_u_r, game_d_r} = 2'b01;
+      game_x_r   = dat[5][4];
+      game_a_r   = dat[5][5];
+      game_b_r   = dat[5][6];
+      game_y_r   = dat[5][7];
+      game_sel_r = dat[6][4];
+      game_sta_r = dat[6][5];
+    end
+  end
+
+  assign game_l   = game_l_r;
+  assign game_r   = game_r_r;
+  assign game_u   = game_u_r;
+  assign game_d   = game_d_r;
+  assign game_a   = game_a_r;
+  assign game_b   = game_b_r;
+  assign game_x   = game_x_r;
+  assign game_y   = game_y_r;
+  assign game_sel = game_sel_r;
+  assign game_sta = game_sta_r;
 
   always @(posedge usbclk) begin : process_in_data
-    data_rdy_r    <= data_rdy;
     data_strobe_r <= data_strobe;
-    report        <= 0;  // ensure pulse
-
-    if (report) begin
-      // clear mouse movement for later
-      mouse_dx <= 0;
-      mouse_dy <= 0;
-    end
 
     if (!data_rdy) begin
       rcvct <= 0;
     end else if (data_strobe && !data_strobe_r) begin  // rising edge of ukp data strobe
-      dat[rcvct] <= ukpdat;
+      if (rcvct == 0) begin
+        //Clear out dat so there's no stale date to go in the next report when
+        //the received packet has less than 8 bytes.
+        {dat[0], dat[1], dat[2], dat[3], dat[4], dat[5], dat[6], dat[7]} <= {ukpdat, 56'b0};
+      end else begin
+        dat[rcvct] <= ukpdat;
+      end
       rcvct <= rcvct + 1;
-    end
-
-    if (packet_valid) begin
-      case (typ)
-        1: begin  // boot keyboard: modifier, reserved, up to six keycodes
-          key_modifiers <= dat[0];
-          key1 <= dat[2];
-          key2 <= dat[3];
-          key3 <= dat[4];
-          key4 <= dat[5];
-        end
-        2: begin  // boot mouse
-          mouse_btn <= dat[0];
-          mouse_dx  <= dat[1];
-          mouse_dy  <= dat[2];
-        end
-        3: begin  // existing generic gamepad interpretation
-          if (dat[0][1:0] != 2'b10) begin
-            game_l <= 0;
-            game_r <= 0;
-            game_u <= 0;
-            game_d <= 0;
-          end
-          if (dat[0] == 8'h00) {game_l, game_r} <= 2'b10;
-          if (dat[0] == 8'hff) {game_l, game_r} <= 2'b01;
-          if (dat[1] == 8'h00) {game_u, game_d} <= 2'b10;
-          if (dat[1] == 8'hff) {game_u, game_d} <= 2'b01;
-          if (dat[0][1:0] != 2'b10) begin
-            if (dat[3][7:6] == 2'b00) {game_l, game_r} <= 2'b10;
-            if (dat[3][7:6] == 2'b11) {game_l, game_r} <= 2'b01;
-            if (dat[4][7:6] == 2'b00) {game_u, game_d} <= 2'b10;
-            if (dat[4][7:6] == 2'b11) {game_u, game_d} <= 2'b01;
-            game_x   <= dat[5][4];
-            game_a   <= dat[5][5];
-            game_b   <= dat[5][6];
-            game_y   <= dat[5][7];
-            game_sel <= dat[6][4];
-            game_sta <= dat[6][5];
-          end
-        end
-        default: begin
-        end
-      endcase
-      report <= 1'b1;
     end
   end
 
